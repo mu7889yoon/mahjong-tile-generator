@@ -9,6 +9,8 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "generate": "ts-node src/cli.ts",
+    "pdf:layout": "ts-node src/png-layout-pdf-cli.ts",
+    "build:merjong-docs": "tsc -p docs/customizable-merjong/packages/merjong-js/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -32,5 +34,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
   }
 }
