@@ -7,7 +7,7 @@
 
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { TileConfig } from './types';
+import { TileConfig, OutputFormat, parseOutputFormat, VALID_OUTPUT_FORMATS } from './types';
 import { validateTileConfig } from './validator';
 import { generateAll } from './generator';
 
@@ -28,21 +28,25 @@ const DEFAULT_OUTPUT_DIR = './output';
 /**
  * ヘルプメッセージを表示
  */
-function printHelp(): void {
+export function printHelp(): void {
   console.log(`
-AWS麻雀牌 SVG生成ツール
+AWS麻雀牌 SVG/PNG生成ツール
 
 Usage: npx ts-node src/cli.ts [options]
 
 Options:
-  -c, --config <path>  設定ファイルのパス (default: ${DEFAULT_CONFIG_PATH})
-  -o, --output <dir>   出力ディレクトリ (default: ${DEFAULT_OUTPUT_DIR})
-  -h, --help           ヘルプを表示
+  -c, --config <path>    設定ファイルのパス (default: ${DEFAULT_CONFIG_PATH})
+  -o, --output <dir>     出力ディレクトリ (default: ${DEFAULT_OUTPUT_DIR})
+  -f, --format <format>  出力形式: svg, png, svg,png (default: svg)
+  -s, --scale <number>   PNGスケールファクター (default: 2)
+  -h, --help             ヘルプを表示
 
 Examples:
   npx ts-node src/cli.ts
-  npx ts-node src/cli.ts --config ./my-config.json --output ./tiles
-  npx ts-node src/cli.ts -c tile-config.json -o output
+  npx ts-node src/cli.ts --format png
+  npx ts-node src/cli.ts --format png --scale 4
+  npx ts-node src/cli.ts --format svg,png --output ./tiles
+  npx ts-node src/cli.ts -c tile-config.json -o output -f png -s 4
 `);
 }
 
@@ -50,10 +54,12 @@ Examples:
 // 引数パース (Argument Parsing)
 // ============================================================================
 
-interface CliOptions {
+export interface CliOptions {
   configPath: string;
   outputDir: string;
   showHelp: boolean;
+  format: OutputFormat;
+  scale?: number;
 }
 
 /**
@@ -62,10 +68,12 @@ interface CliOptions {
  * @param args コマンドライン引数（process.argv.slice(2)）
  * @returns パースされたオプション
  */
-function parseArgs(args: string[]): CliOptions {
+export function parseArgs(args: string[]): CliOptions {
   let configPath = DEFAULT_CONFIG_PATH;
   let outputDir = DEFAULT_OUTPUT_DIR;
   let showHelp = false;
+  let format: OutputFormat = 'svg';
+  let scale: number | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -80,12 +88,34 @@ function parseArgs(args: string[]): CliOptions {
       if (nextArg) {
         outputDir = nextArg;
       }
+    } else if (arg === '--format' || arg === '-f') {
+      const nextArg = args[++i];
+      if (nextArg) {
+        const parsed = parseOutputFormat(nextArg);
+        if (parsed === null) {
+          console.error(`\n❌ 無効な出力形式です: "${nextArg}"`);
+          console.error(`有効な形式: ${VALID_OUTPUT_FORMATS.join(', ')}`);
+          process.exit(1);
+        }
+        format = parsed;
+      }
     } else if (arg === '--help' || arg === '-h') {
       showHelp = true;
+    } else if (arg === '--scale' || arg === '-s') {
+      const nextArg = args[++i];
+      if (nextArg) {
+        const parsed = parseFloat(nextArg);
+        if (isNaN(parsed) || parsed <= 0) {
+          console.error(`\n❌ 無効なスケール値です: "${nextArg}"`);
+          console.error('正の数値を指定してください（例: 1, 2, 4）');
+          process.exit(1);
+        }
+        scale = parsed;
+      }
     }
   }
 
-  return { configPath, outputDir, showHelp };
+  return { configPath, outputDir, showHelp, format, scale };
 }
 
 // ============================================================================
@@ -130,8 +160,9 @@ async function loadConfig(configPath: string): Promise<TileConfig> {
  * @param outputDir 出力ディレクトリ
  */
 function printResult(result: Awaited<ReturnType<typeof generateAll>>, outputDir: string): void {
+  const formatLabel = result.format ?? 'svg';
   console.log('\n========================================');
-  console.log('AWS麻雀牌 SVG生成結果');
+  console.log('AWS麻雀牌 生成結果');
   console.log('========================================\n');
 
   if (result.success) {
@@ -141,6 +172,7 @@ function printResult(result: Awaited<ReturnType<typeof generateAll>>, outputDir:
   }
 
   console.log(`📁 出力ディレクトリ: ${path.resolve(outputDir)}`);
+  console.log(`🎨 出力形式: ${formatLabel}`);
   console.log(`📊 生成数: ${result.generated} 牌`);
   console.log(`❌ 失敗数: ${result.failed} 牌`);
   console.log(`📋 マニフェスト: ${path.join(outputDir, 'tiles-manifest.json')}`);
@@ -173,9 +205,14 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  console.log('\n🀄 AWS麻雀牌 SVG生成ツール\n');
+  console.log('\n🀄 AWS麻雀牌 生成ツール\n');
   console.log(`📄 設定ファイル: ${options.configPath}`);
-  console.log(`📁 出力先: ${options.outputDir}\n`);
+  console.log(`📁 出力先: ${options.outputDir}`);
+  console.log(`🎨 出力形式: ${options.format}`);
+  if (options.scale) {
+    console.log(`🔍 スケール: ${options.scale}x`);
+  }
+  console.log('');
 
   try {
     // 1. 設定ファイルを読み込み
@@ -199,9 +236,9 @@ async function main(): Promise<void> {
     }
     console.log('✅ 設定の検証が完了しました');
 
-    // 3. SVGを生成
-    console.log('⏳ SVGを生成中...');
-    const result = await generateAll(config, options.outputDir);
+    // 3. 牌画像を生成
+    console.log(`⏳ 牌画像を生成中... (形式: ${options.format})`);
+    const result = await generateAll(config, options.outputDir, options.format, options.scale ? { scale: options.scale } : undefined);
 
     // 4. 結果を表示
     printResult(result, options.outputDir);
@@ -215,8 +252,10 @@ async function main(): Promise<void> {
   }
 }
 
-// メイン関数を実行
-main().catch((error) => {
-  console.error('予期しないエラー:', error);
-  process.exit(1);
-});
+// メイン関数を実行（テスト時はインポートのみ）
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('予期しないエラー:', error);
+    process.exit(1);
+  });
+}

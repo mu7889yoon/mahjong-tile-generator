@@ -159,7 +159,7 @@ export interface GenerationError {
   /** エラーメッセージ */
   message: string;
   /** エラーの種類 */
-  type: 'icon_not_found' | 'output_error' | 'template_error' | 'unknown';
+  type: 'icon_not_found' | 'output_error' | 'template_error' | 'png_conversion_error' | 'unknown';
 }
 
 /**
@@ -174,6 +174,8 @@ export interface TileManifestEntry {
   number: number;
   /** 生成されたSVGファイルのパス */
   filePath: string;
+  /** 生成されたPNGファイルのパス（PNG形式時） */
+  pngFilePath?: string;
   /** AWSサービス情報（簡略版） */
   awsService: {
     id: string;
@@ -211,6 +213,8 @@ export interface GenerationResult {
   errors: GenerationError[];
   /** 生成されたマニフェスト */
   manifest: TileManifest;
+  /** 出力形式（PNG機能追加後に設定される） */
+  format?: OutputFormat;
 }
 
 // ============================================================================
@@ -246,8 +250,62 @@ export interface TileGenerator {
 }
 
 // ============================================================================
+// 出力形式 (Output Format)
+// ============================================================================
+
+/**
+ * 出力形式
+ * - svg: SVGのみ出力
+ * - png: PNGのみ出力
+ * - svg,png: SVGとPNGの両方を出力
+ */
+export type OutputFormat = 'svg' | 'png' | 'svg,png';
+
+/**
+ * PNG変換オプション
+ */
+export interface PngConvertOptions {
+  /** スケールファクター（デフォルト: 2） */
+  scale?: number;
+}
+
+/**
+ * PNG変換結果
+ */
+export interface PngConvertResult {
+  /** 成功したかどうか */
+  success: boolean;
+  /** PNGバイナリデータ（成功時） */
+  buffer?: Buffer;
+  /** エラーメッセージ（失敗時） */
+  error?: string;
+  /** 出力画像の幅（px） */
+  width?: number;
+  /** 出力画像の高さ（px） */
+  height?: number;
+}
+
+// ============================================================================
 // 定数 (Constants)
 // ============================================================================
+
+/**
+ * 有効な出力形式の配列
+ */
+export const VALID_OUTPUT_FORMATS: readonly string[] = ['svg', 'png', 'svg,png'] as const;
+
+/**
+ * 文字列をOutputFormatにパース
+ * 有効な値: 'svg', 'png', 'svg,png'
+ * @param value パースする文字列
+ * @returns 有効な場合はOutputFormat、無効な場合はnull
+ */
+export function parseOutputFormat(value: string): OutputFormat | null {
+  if (VALID_OUTPUT_FORMATS.includes(value)) {
+    return value as OutputFormat;
+  }
+  return null;
+}
 
 /**
  * 有効な牌種類の配列

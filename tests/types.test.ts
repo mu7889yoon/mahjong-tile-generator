@@ -12,6 +12,8 @@ import {
   TILE_NUMBER_RANGES,
   HONOR_TILE_NAMES,
   TILE_TYPE_NAMES,
+  parseOutputFormat,
+  VALID_OUTPUT_FORMATS,
 } from '../src/types';
 
 describe('Types - 基本テスト', () => {
@@ -102,5 +104,88 @@ describe('Types - プロパティベーステスト (fast-check)', () => {
       }),
       { numRuns: 100 }
     );
+  });
+});
+
+
+describe('parseOutputFormat - プロパティベーステスト (fast-check)', () => {
+  /**
+   * **Feature: png-output, Property 1: フォーマットパースの正確性**
+   *
+   * *For any* 文字列、`parseOutputFormat` は有効な値（`'svg'`、`'png'`、`'svg,png'`）に対して
+   * 対応する `OutputFormat` を返し、それ以外の全ての文字列に対して `null` を返す。
+   *
+   * **Validates: Requirements 1.1, 1.3**
+   */
+  it('有効な形式文字列は常に対応する OutputFormat を返す', () => {
+    const validFormatArb = fc.constantFrom('svg', 'png', 'svg,png');
+
+    fc.assert(
+      fc.property(validFormatArb, (format) => {
+        const result = parseOutputFormat(format);
+        return result === format;
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it('任意の文字列に対して、有効な値なら対応する OutputFormat を返し、それ以外は null を返す', () => {
+    fc.assert(
+      fc.property(fc.string(), (input) => {
+        const result = parseOutputFormat(input);
+        if (VALID_OUTPUT_FORMATS.includes(input)) {
+          return result === input;
+        } else {
+          return result === null;
+        }
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+describe('parseOutputFormat - ユニットテスト', () => {
+  describe('有効な値', () => {
+    it('svg を OutputFormat として返す', () => {
+      expect(parseOutputFormat('svg')).toBe('svg');
+    });
+
+    it('png を OutputFormat として返す', () => {
+      expect(parseOutputFormat('png')).toBe('png');
+    });
+
+    it('svg,png を OutputFormat として返す', () => {
+      expect(parseOutputFormat('svg,png')).toBe('svg,png');
+    });
+  });
+
+  describe('無効な値', () => {
+    it('空文字列は null を返す', () => {
+      expect(parseOutputFormat('')).toBeNull();
+    });
+
+    it('大文字の SVG は null を返す', () => {
+      expect(parseOutputFormat('SVG')).toBeNull();
+    });
+
+    it('大文字の PNG は null を返す', () => {
+      expect(parseOutputFormat('PNG')).toBeNull();
+    });
+
+    it('スペースを含む値は null を返す', () => {
+      expect(parseOutputFormat('svg, png')).toBeNull();
+    });
+
+    it('順序が逆の png,svg は null を返す', () => {
+      expect(parseOutputFormat('png,svg')).toBeNull();
+    });
+
+    it('未知の形式 jpg は null を返す', () => {
+      expect(parseOutputFormat('jpg')).toBeNull();
+    });
+
+    it('任意の文字列は null を返す', () => {
+      expect(parseOutputFormat('random-string')).toBeNull();
+    });
   });
 });

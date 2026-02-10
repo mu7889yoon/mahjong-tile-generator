@@ -14,6 +14,7 @@ import {
   TileManifestEntry,
   TILE_TYPE_NAMES,
   HONOR_TILE_NAMES,
+  OutputFormat,
 } from './types';
 import {
   replaceAllPlaceholders,
@@ -345,6 +346,19 @@ export function generateFilenameFromId(tileId: string): string {
   return `${tileId}.svg`;
 }
 
+/**
+ * MPSZ形式のPNGファイル名を生成
+ * 
+ * Requirements: 6.1, 6.2 - PNGファイル名を `{number}{type}.png` 形式で生成
+ * SVGファイル名の拡張子を `.svg` から `.png` に変更したものと一致する
+ * 
+ * @param entry 牌エントリ
+ * @returns PNGファイル名（例: "1m.png", "5p.png", "7z.png"）
+ */
+export function generatePngFilename(entry: TileEntry): string {
+  return `${entry.number}${entry.type}.png`;
+}
+
 // ============================================================================
 // ファイル出力処理 (File Output Processing)
 // ============================================================================
@@ -428,17 +442,45 @@ export const MANIFEST_VERSION = '1.0.0';
 /**
  * 牌エントリからマニフェストエントリを作成
  * 
- * Requirements: 4.2 - マニフェストファイルの生成
+ * Requirements: 4.1, 4.2, 4.3 - マニフェストファイルの生成（形式に応じたパス設定）
+ * 
+ * 形式に応じた `filePath` と `pngFilePath` の設定:
+ * - `'svg'` (デフォルト): `filePath` = SVGパス (.svg), `pngFilePath` = undefined
+ * - `'png'`: `filePath` = PNGパス (.png), `pngFilePath` = undefined
+ * - `'svg,png'`: `filePath` = SVGパス (.svg), `pngFilePath` = PNGパス (.png)
  * 
  * @param entry 牌エントリ
  * @param outputDir 出力ディレクトリのパス
+ * @param format 出力形式（デフォルト: 'svg'）
  * @returns マニフェストエントリ
  */
-export function createManifestEntry(entry: TileEntry, outputDir: string): TileManifestEntry {
-  const filename = generateFilename(entry);
-  const filePath = path.join(outputDir, filename);
-  
-  return {
+export function createManifestEntry(entry: TileEntry, outputDir: string, format: OutputFormat = 'svg'): TileManifestEntry {
+  const svgFilename = generateFilename(entry);
+  const pngFilename = generatePngFilename(entry);
+
+  let filePath: string;
+  let pngFilePath: string | undefined;
+
+  switch (format) {
+    case 'png':
+      // PNG形式のみ: filePathにPNGパスを設定、pngFilePathは省略
+      filePath = path.join(outputDir, pngFilename);
+      pngFilePath = undefined;
+      break;
+    case 'svg,png':
+      // SVG+PNG形式: filePathにSVGパス、pngFilePathにPNGパスを設定
+      filePath = path.join(outputDir, svgFilename);
+      pngFilePath = path.join(outputDir, pngFilename);
+      break;
+    case 'svg':
+    default:
+      // SVG形式のみ（デフォルト）: filePathにSVGパスを設定、pngFilePathは省略
+      filePath = path.join(outputDir, svgFilename);
+      pngFilePath = undefined;
+      break;
+  }
+
+  const manifestEntry: TileManifestEntry = {
     id: entry.id,
     type: entry.type,
     number: entry.number,
@@ -448,19 +490,27 @@ export function createManifestEntry(entry: TileEntry, outputDir: string): TileMa
       displayName: entry.awsService.displayName,
     },
   };
+
+  if (pngFilePath !== undefined) {
+    manifestEntry.pngFilePath = pngFilePath;
+  }
+
+  return manifestEntry;
 }
 
 /**
  * TileConfigから完全なマニフェストを作成
  * 
- * Requirements: 4.2 - マニフェストファイルの生成
+ * Requirements: 4.1, 4.2, 4.3 - マニフェストファイルの生成（形式に応じたパス設定）
  * 
  * @param config 牌設定
  * @param outputDir 出力ディレクトリのパス
+ * @param format 出力形式（デフォルト: 'svg'）
  * @returns 牌マニフェスト
  */
-export function createManifest(config: TileConfig, outputDir: string): TileManifest {
-  const tiles = config.tiles.map((entry) => createManifestEntry(entry, outputDir));
+export function createManifest(config: TileConfig, outputDir: string, format?: OutputFormat): TileManifest {
+  const effectiveFormat: OutputFormat = format ?? 'svg';
+  const tiles = config.tiles.map((entry) => createManifestEntry(entry, outputDir, effectiveFormat));
   
   return {
     version: MANIFEST_VERSION,
@@ -498,21 +548,49 @@ export async function writeManifest(manifest: TileManifest, outputDir: string): 
 import { validateTileConfig } from './validator';
 import { GenerationResult, GenerationError } from './types';
 import { BASE_TILE_TEMPLATE } from './template';
+import { convertSvgToPng, writeTilePng } from './png-converter';
+
+/**
+ * 指定された形式にSVGが含まれるかどうかを判定
+ * @param format 出力形式
+ * @returns SVGが含まれる場合はtrue
+ */
+function includesSvg(format: OutputFormat): boolean {
+  return format === 'svg' || format === 'svg,png';
+}
+
+/**
+ * 指定された形式にPNGが含まれるかどうかを判定
+ * @param format 出力形式
+ * @returns PNGが含まれる場合はtrue
+ */
+function includesPng(format: OutputFormat): boolean {
+  return format === 'png' || format === 'svg,png';
+}
 
 /**
  * 全牌を一括生成
  * 
+ * Requirements: 1.1 - 指定された形式で牌画像を生成
+ * Requirements: 3.1 - PNGファイルをMPSZ形式のファイル名で出力
+ * Requirements: 3.2 - SVGとPNGの両方を同じ出力ディレクトリに生成
+ * Requirements: 3.4 - PNGファイル書き込みエラー時も残りの牌の生成を継続
  * Requirements: 4.4 - バッチ生成コマンド
  * Requirements: 4.5 - 生成結果レポート
+ * Requirements: 5.1, 5.2 - 形式ごとの生成数をレポート
  * 
  * @param config 牌設定
  * @param outputDir 出力ディレクトリのパス
+ * @param format 出力形式（デフォルト: 'svg'）
  * @returns 生成結果（成功数、失敗数、エラー、マニフェスト）
  */
 export async function generateAll(
   config: TileConfig,
-  outputDir: string
+  outputDir: string,
+  format?: OutputFormat,
+  options?: { scale?: number }
 ): Promise<GenerationResult> {
+  const effectiveFormat: OutputFormat = format ?? 'svg';
   const errors: GenerationError[] = [];
   let generated = 0;
   let failed = 0;
@@ -541,6 +619,7 @@ export async function generateAll(
       failed: validationResult.errors.length,
       errors: validationErrors,
       manifest: emptyManifest,
+      format: effectiveFormat,
     };
   }
 
@@ -566,10 +645,11 @@ export async function generateAll(
         type: 'output_error',
       }],
       manifest: emptyManifest,
+      format: effectiveFormat,
     };
   }
 
-  // 3. 各牌のSVGを生成して書き込み
+  // 3. 各牌のSVG/PNGを生成して書き込み
   for (const entry of config.tiles) {
     try {
       // アイコンを読み込み（失敗してもSVG生成は続行）
@@ -585,14 +665,60 @@ export async function generateAll(
         });
       }
 
-      // SVGを生成
+      // SVG文字列を生成（常に実行 - PNG変換にも必要）
       const svgContent = generateTile(entry, BASE_TILE_TEMPLATE, iconContent);
 
-      // ファイルに書き込み
-      const filename = generateFilename(entry);
-      await writeTileSvg(svgContent, outputDir, filename);
+      // 少なくとも1つの形式が正常に書き込まれたかを追跡
+      let tileWrittenSuccessfully = false;
 
-      generated++;
+      // SVG形式が含まれる場合: SVGファイルを書き込み
+      if (includesSvg(effectiveFormat)) {
+        try {
+          const svgFilename = generateFilename(entry);
+          await writeTileSvg(svgContent, outputDir, svgFilename);
+          tileWrittenSuccessfully = true;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          errors.push({
+            tileId: entry.id,
+            message: `SVGファイルの書き込みに失敗しました: ${errorMessage}`,
+            type: 'output_error',
+          });
+        }
+      }
+
+      // PNG形式が含まれる場合: SVG→PNG変換 → PNGファイルを書き込み
+      if (includesPng(effectiveFormat)) {
+        const pngResult = convertSvgToPng(svgContent, options?.scale ? { scale: options.scale } : undefined);
+        if (pngResult.success && pngResult.buffer) {
+          try {
+            const pngFilename = generatePngFilename(entry);
+            await writeTilePng(pngResult.buffer, outputDir, pngFilename);
+            tileWrittenSuccessfully = true;
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            errors.push({
+              tileId: entry.id,
+              message: `PNGファイルの書き込みに失敗しました: ${errorMessage}`,
+              type: 'output_error',
+            });
+          }
+        } else {
+          // PNG変換エラー
+          errors.push({
+            tileId: entry.id,
+            message: pngResult.error || 'PNG変換に失敗しました',
+            type: 'png_conversion_error',
+          });
+        }
+      }
+
+      // 少なくとも1つの形式が正常に書き込まれた場合、生成成功とカウント
+      if (tileWrittenSuccessfully) {
+        generated++;
+      } else {
+        failed++;
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       errors.push({
@@ -605,7 +731,7 @@ export async function generateAll(
   }
 
   // 4. マニフェストを生成して書き込み
-  const manifest = createManifest(config, outputDir);
+  const manifest = createManifest(config, outputDir, effectiveFormat);
   
   try {
     await writeManifest(manifest, outputDir);
@@ -620,11 +746,13 @@ export async function generateAll(
 
   // 5. 結果を返す
   // Requirements: 4.5 - 生成数とエラー数をレポート
+  // Requirements: 5.3 - 生成された形式の情報を含む
   return {
     success: failed === 0,
     generated,
     failed,
     errors,
     manifest,
+    format: effectiveFormat,
   };
 }

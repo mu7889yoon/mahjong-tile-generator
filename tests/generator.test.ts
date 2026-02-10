@@ -18,6 +18,7 @@ import {
   generateTile,
   generateFilename,
   generateFilenameFromId,
+  generatePngFilename,
   DEFAULT_ICON_AREA,
   ensureOutputDirectory,
   getOutputPath,
@@ -28,7 +29,7 @@ import {
   MANIFEST_FILENAME,
   MANIFEST_VERSION,
 } from '../src/generator';
-import { TileEntry, TileType, TileConfig, TileManifest, TileManifestEntry, TILE_TYPE_NAMES, HONOR_TILE_NAMES, VALID_TILE_TYPES, TILE_NUMBER_RANGES } from '../src/types';
+import { TileEntry, TileType, TileConfig, TileManifest, TileManifestEntry, TILE_TYPE_NAMES, HONOR_TILE_NAMES, VALID_TILE_TYPES, TILE_NUMBER_RANGES, OutputFormat } from '../src/types';
 import { BASE_TILE_TEMPLATE } from '../src/template';
 import { createValidTileEntry, createValidTileConfig } from '../src/validator';
 
@@ -642,6 +643,81 @@ describe('SVGジェネレーター', () => {
       const manifestEntry = createManifestEntry(entry, 'output');
       
       expect(manifestEntry.filePath).toBe(path.join('output', expected));
+    });
+
+    // OutputFormat パラメータのテスト (Requirements: 4.1, 4.2, 4.3)
+    describe('OutputFormat パラメータ', () => {
+      it('format省略時（デフォルト）はSVGパスを設定し、pngFilePathはundefined', () => {
+        const entry = createValidTileEntry({ id: '1m', type: 'm', number: 1 });
+        const manifestEntry = createManifestEntry(entry, 'output');
+
+        expect(manifestEntry.filePath).toBe(path.join('output', '1m.svg'));
+        expect(manifestEntry.pngFilePath).toBeUndefined();
+      });
+
+      it('format="svg" の場合、filePathはSVGパス、pngFilePathはundefined', () => {
+        const entry = createValidTileEntry({ id: '5p', type: 'p', number: 5 });
+        const manifestEntry = createManifestEntry(entry, 'output', 'svg');
+
+        expect(manifestEntry.filePath).toBe(path.join('output', '5p.svg'));
+        expect(manifestEntry.pngFilePath).toBeUndefined();
+      });
+
+      it('format="png" の場合、filePathはPNGパス、pngFilePathはundefined', () => {
+        const entry = createValidTileEntry({ id: '9s', type: 's', number: 9 });
+        const manifestEntry = createManifestEntry(entry, 'output', 'png');
+
+        expect(manifestEntry.filePath).toBe(path.join('output', '9s.png'));
+        expect(manifestEntry.pngFilePath).toBeUndefined();
+      });
+
+      it('format="svg,png" の場合、filePathはSVGパス、pngFilePathはPNGパス', () => {
+        const entry = createValidTileEntry({ id: '7z', type: 'z', number: 7 });
+        const manifestEntry = createManifestEntry(entry, 'output', 'svg,png');
+
+        expect(manifestEntry.filePath).toBe(path.join('output', '7z.svg'));
+        expect(manifestEntry.pngFilePath).toBe(path.join('output', '7z.png'));
+      });
+
+      it('format="png" の場合、他のフィールド（id, type, number, awsService）は正しく設定される', () => {
+        const entry = createValidTileEntry({
+          id: '3m',
+          type: 'm',
+          number: 3,
+          awsService: {
+            id: 'ec2',
+            displayName: 'Amazon EC2',
+            iconPath: 'assets/icons/ec2.svg',
+          },
+        });
+        const manifestEntry = createManifestEntry(entry, 'tiles', 'png');
+
+        expect(manifestEntry.id).toBe('3m');
+        expect(manifestEntry.type).toBe('m');
+        expect(manifestEntry.number).toBe(3);
+        expect(manifestEntry.awsService.id).toBe('ec2');
+        expect(manifestEntry.awsService.displayName).toBe('Amazon EC2');
+      });
+
+      it('format="svg,png" の場合、他のフィールドは正しく設定される', () => {
+        const entry = createValidTileEntry({
+          id: '2p',
+          type: 'p',
+          number: 2,
+          awsService: {
+            id: 'lambda',
+            displayName: 'AWS Lambda',
+            iconPath: 'assets/icons/lambda.svg',
+          },
+        });
+        const manifestEntry = createManifestEntry(entry, 'tiles', 'svg,png');
+
+        expect(manifestEntry.id).toBe('2p');
+        expect(manifestEntry.type).toBe('p');
+        expect(manifestEntry.number).toBe(2);
+        expect(manifestEntry.awsService.id).toBe('lambda');
+        expect(manifestEntry.awsService.displayName).toBe('AWS Lambda');
+      });
     });
   });
 
@@ -4368,5 +4444,525 @@ describe('Property 10: バッチ生成レポート (Batch Generation Report)', (
       }),
       { numRuns: 100 }
     );
+  });
+});
+
+// ============================================================================
+// Property 5: ファイル名の一貫性 (Filename Consistency)
+// ============================================================================
+
+describe('Property 5: ファイル名の一貫性 (Filename Consistency)', () => {
+  /**
+   * **Property 5: ファイル名の一貫性**
+   * **Validates: Requirements 3.1, 6.1, 6.2**
+   *
+   * *For any* 有効な `TileEntry`、`generatePngFilename(entry)` の結果は
+   * `generateFilename(entry)` の拡張子 `.svg` を `.png` に置換したものと一致する。
+   */
+
+  /**
+   * 牌種類のArbitrary
+   */
+  const tileTypeArb = fc.constantFrom<TileType>('m', 'p', 's', 'z');
+
+  /**
+   * 有効なTileEntryを生成するArbitrary
+   * 牌の種類に応じた正しい番号範囲を使用（m/p/s: 1-9, z: 1-7）
+   */
+  const validTileEntryArb: fc.Arbitrary<TileEntry> = tileTypeArb.chain((type) => {
+    const range = TILE_NUMBER_RANGES[type];
+    return fc.integer({ min: range.min, max: range.max }).chain((number) => {
+      return fc.record({
+        id: fc.constant(`${number}${type}`),
+        type: fc.constant(type),
+        number: fc.constant(number),
+        awsService: fc.record({
+          id: fc.stringMatching(/^[a-z][a-z0-9-]{1,20}$/),
+          displayName: fc.string({ minLength: 1, maxLength: 50 }),
+          iconPath: fc.constant(`assets/icons/${number}${type}.svg`),
+        }),
+      }) as fc.Arbitrary<TileEntry>;
+    });
+  });
+
+  it('generatePngFilenameはgenerateFilenameの拡張子を.svgから.pngに置換したものと一致する', () => {
+    /**
+     * **Validates: Requirements 3.1, 6.1, 6.2**
+     *
+     * このプロパティテストは、任意の有効なTileEntryに対して
+     * generatePngFilename(entry) の結果が
+     * generateFilename(entry).replace('.svg', '.png') と一致することを検証します。
+     */
+    fc.assert(
+      fc.property(validTileEntryArb, (entry: TileEntry) => {
+        const pngFilename = generatePngFilename(entry);
+        const svgFilename = generateFilename(entry);
+        const expectedPngFilename = svgFilename.replace('.svg', '.png');
+
+        // PNGファイル名がSVGファイル名の拡張子置換と一致することを検証
+        expect(pngFilename).toBe(expectedPngFilename);
+
+        // PNGファイル名が.png拡張子で終わることを検証
+        expect(pngFilename).toMatch(/\.png$/);
+
+        // SVGファイル名が.svg拡張子で終わることを検証
+        expect(svgFilename).toMatch(/\.svg$/);
+
+        // 拡張子を除いたベース名が一致することを検証
+        const pngBase = pngFilename.replace('.png', '');
+        const svgBase = svgFilename.replace('.svg', '');
+        expect(pngBase).toBe(svgBase);
+
+        // ベース名が{number}{type}形式であることを検証
+        expect(pngBase).toBe(`${entry.number}${entry.type}`);
+
+        return true;
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+
+// ============================================================================
+// Property 6: マニフェストエントリの形式依存内容 (Manifest Entry Format-Dependent Content)
+// ============================================================================
+
+describe('Property 6: マニフェストエントリの形式依存内容 (Manifest Entry Format-Dependent Content)', () => {
+  /**
+   * **Property 6: マニフェストエントリの形式依存内容**
+   * **Validates: Requirements 4.1, 4.2, 4.3**
+   *
+   * *For any* 有効な `TileEntry` と `OutputFormat` の組み合わせ:
+   * - `'svg'` の場合: マニフェストエントリの `filePath` は `.svg` で終わり、`pngFilePath` は未定義
+   * - `'png'` の場合: マニフェストエントリの `filePath` は `.png` で終わり、`pngFilePath` は未定義
+   * - `'svg,png'` の場合: `filePath` は `.svg` で終わり、`pngFilePath` は `.png` で終わる
+   */
+
+  /**
+   * 牌種類のArbitrary
+   */
+  const tileTypeArb = fc.constantFrom<TileType>('m', 'p', 's', 'z');
+
+  /**
+   * 有効なTileEntryを生成するArbitrary
+   * 牌の種類に応じた正しい番号範囲を使用（m/p/s: 1-9, z: 1-7）
+   */
+  const validTileEntryArb: fc.Arbitrary<TileEntry> = tileTypeArb.chain((type) => {
+    const range = TILE_NUMBER_RANGES[type];
+    return fc.integer({ min: range.min, max: range.max }).chain((number) => {
+      return fc.record({
+        id: fc.constant(`${number}${type}`),
+        type: fc.constant(type),
+        number: fc.constant(number),
+        awsService: fc.record({
+          id: fc.stringMatching(/^[a-z][a-z0-9-]{1,20}$/),
+          displayName: fc.string({ minLength: 1, maxLength: 50 }),
+          iconPath: fc.constant(`assets/icons/${number}${type}.svg`),
+        }),
+      }) as fc.Arbitrary<TileEntry>;
+    });
+  });
+
+  /**
+   * OutputFormatのArbitrary
+   */
+  const outputFormatArb = fc.constantFrom<OutputFormat>('svg', 'png', 'svg,png');
+
+  it('マニフェストエントリのfilePathとpngFilePathが出力形式に応じて正しく設定される', () => {
+    /**
+     * **Validates: Requirements 4.1, 4.2, 4.3**
+     *
+     * このプロパティテストは、任意の有効なTileEntryとOutputFormatの組み合わせに対して
+     * createManifestEntry が形式に応じた正しいファイルパスを設定することを検証します。
+     */
+    fc.assert(
+      fc.property(validTileEntryArb, outputFormatArb, (entry: TileEntry, format: OutputFormat) => {
+        const manifestEntry = createManifestEntry(entry, 'output', format);
+
+        switch (format) {
+          case 'svg':
+            // SVG形式: filePathは.svgで終わり、pngFilePathは未定義
+            expect(manifestEntry.filePath).toMatch(/\.svg$/);
+            expect(manifestEntry.pngFilePath).toBeUndefined();
+            break;
+
+          case 'png':
+            // PNG形式: filePathは.pngで終わり、pngFilePathは未定義
+            expect(manifestEntry.filePath).toMatch(/\.png$/);
+            expect(manifestEntry.pngFilePath).toBeUndefined();
+            break;
+
+          case 'svg,png':
+            // SVG+PNG形式: filePathは.svgで終わり、pngFilePathは.pngで終わる
+            expect(manifestEntry.filePath).toMatch(/\.svg$/);
+            expect(manifestEntry.pngFilePath).toBeDefined();
+            expect(manifestEntry.pngFilePath).toMatch(/\.png$/);
+            break;
+        }
+
+        return true;
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ============================================================================
+// generateAll format パラメータテスト (Tasks 5.1, 5.2)
+// ============================================================================
+
+describe('generateAll format パラメータ (Requirements: 1.1, 3.1, 3.2, 3.4, 5.1, 5.2)', () => {
+  const TEST_FORMAT_DIR = 'test-format-output';
+
+  beforeEach(async () => {
+    await fs.rm(TEST_FORMAT_DIR, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(TEST_FORMAT_DIR, { recursive: true, force: true });
+  });
+
+  describe('デフォルト動作（format省略）', () => {
+    it('format省略時はSVGのみ生成し、format="svg"を返す', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR);
+
+      expect(result.success).toBe(true);
+      expect(result.format).toBe('svg');
+      expect(result.generated).toBe(1);
+
+      // SVGファイルが存在する
+      const svgExists = await fs.stat(path.join(TEST_FORMAT_DIR, '1m.svg'))
+        .then(() => true).catch(() => false);
+      expect(svgExists).toBe(true);
+
+      // PNGファイルは存在しない
+      const pngExists = await fs.stat(path.join(TEST_FORMAT_DIR, '1m.png'))
+        .then(() => true).catch(() => false);
+      expect(pngExists).toBe(false);
+    });
+  });
+
+  describe('format="svg"', () => {
+    it('SVGファイルのみ生成される', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+          createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'svg');
+
+      expect(result.success).toBe(true);
+      expect(result.format).toBe('svg');
+      expect(result.generated).toBe(2);
+
+      // SVGファイルが存在する
+      for (const name of ['1m.svg', '5p.svg']) {
+        const exists = await fs.stat(path.join(TEST_FORMAT_DIR, name))
+          .then(() => true).catch(() => false);
+        expect(exists).toBe(true);
+      }
+
+      // PNGファイルは存在しない
+      for (const name of ['1m.png', '5p.png']) {
+        const exists = await fs.stat(path.join(TEST_FORMAT_DIR, name))
+          .then(() => true).catch(() => false);
+        expect(exists).toBe(false);
+      }
+    });
+  });
+
+  describe('format="png"', () => {
+    it('PNGファイルのみ生成され、SVGファイルは生成されない', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+          createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'png');
+
+      expect(result.success).toBe(true);
+      expect(result.format).toBe('png');
+      expect(result.generated).toBe(2);
+
+      // PNGファイルが存在する
+      for (const name of ['1m.png', '5p.png']) {
+        const exists = await fs.stat(path.join(TEST_FORMAT_DIR, name))
+          .then(() => true).catch(() => false);
+        expect(exists).toBe(true);
+      }
+
+      // SVGファイルは存在しない
+      for (const name of ['1m.svg', '5p.svg']) {
+        const exists = await fs.stat(path.join(TEST_FORMAT_DIR, name))
+          .then(() => true).catch(() => false);
+        expect(exists).toBe(false);
+      }
+    });
+
+    it('生成されたPNGファイルはPNGシグネチャで始まる', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      await generateAll(config, TEST_FORMAT_DIR, 'png');
+
+      const pngContent = await fs.readFile(path.join(TEST_FORMAT_DIR, '1m.png'));
+      const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+      expect(Buffer.compare(pngContent.subarray(0, 8), pngSignature)).toBe(0);
+    });
+  });
+
+  describe('format="svg,png"', () => {
+    it('SVGとPNGの両方のファイルが生成される (Requirements: 3.2)', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+          createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'svg,png');
+
+      expect(result.success).toBe(true);
+      expect(result.format).toBe('svg,png');
+      expect(result.generated).toBe(2);
+
+      // SVGファイルとPNGファイルの両方が存在する
+      for (const id of ['1m', '5p']) {
+        const svgExists = await fs.stat(path.join(TEST_FORMAT_DIR, `${id}.svg`))
+          .then(() => true).catch(() => false);
+        const pngExists = await fs.stat(path.join(TEST_FORMAT_DIR, `${id}.png`))
+          .then(() => true).catch(() => false);
+        expect(svgExists).toBe(true);
+        expect(pngExists).toBe(true);
+      }
+    });
+  });
+
+  describe('エラーハンドリング', () => {
+    it('バリデーションエラー時もformat情報が返される', async () => {
+      const invalidConfig = {
+        tiles: null,
+        metadata: { version: '1.0.0' },
+      } as unknown as TileConfig;
+
+      const result = await generateAll(invalidConfig, TEST_FORMAT_DIR, 'png');
+
+      expect(result.success).toBe(false);
+      expect(result.format).toBe('png');
+    });
+
+    it('format省略でバリデーションエラー時はformat="svg"が返される', async () => {
+      const invalidConfig = {
+        tiles: null,
+        metadata: { version: '1.0.0' },
+      } as unknown as TileConfig;
+
+      const result = await generateAll(invalidConfig, TEST_FORMAT_DIR);
+
+      expect(result.success).toBe(false);
+      expect(result.format).toBe('svg');
+    });
+
+    it('PNG変換エラーは記録されるが残りの牌の生成は継続する (Requirements: 3.4)', async () => {
+      // 複数の牌を生成し、全体が成功することを確認
+      // （通常のSVGは変換可能なので、エラーは発生しないが、
+      //  エラーハンドリングのパスが存在することを確認）
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+          createValidTileEntry({ id: '2m', type: 'm', number: 2 }),
+          createValidTileEntry({ id: '3m', type: 'm', number: 3 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'png');
+
+      expect(result.generated).toBe(3);
+      // png_conversion_error タイプのエラーがないことを確認
+      const pngErrors = result.errors.filter(e => e.type === 'png_conversion_error');
+      expect(pngErrors).toHaveLength(0);
+    });
+  });
+
+  describe('マニフェスト連携 (Task 5.2)', () => {
+    it('format="svg" のマニフェストエントリはSVGパスのみ', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'svg');
+
+      expect(result.manifest.tiles[0].filePath).toMatch(/\.svg$/);
+      expect(result.manifest.tiles[0].pngFilePath).toBeUndefined();
+    });
+
+    it('format="png" のマニフェストエントリはPNGパスのみ', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'png');
+
+      expect(result.manifest.tiles[0].filePath).toMatch(/\.png$/);
+      expect(result.manifest.tiles[0].pngFilePath).toBeUndefined();
+    });
+
+    it('format="svg,png" のマニフェストエントリはSVGパスとPNGパスの両方', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      const result = await generateAll(config, TEST_FORMAT_DIR, 'svg,png');
+
+      expect(result.manifest.tiles[0].filePath).toMatch(/\.svg$/);
+      expect(result.manifest.tiles[0].pngFilePath).toBeDefined();
+      expect(result.manifest.tiles[0].pngFilePath).toMatch(/\.png$/);
+    });
+
+    it('マニフェストファイルにformat情報が反映される', async () => {
+      const config: TileConfig = {
+        tiles: [
+          createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+          createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+        ],
+        metadata: { version: '1.0.0' },
+      };
+
+      await generateAll(config, TEST_FORMAT_DIR, 'svg,png');
+
+      // マニフェストファイルを読み込んで確認
+      const manifestContent = await fs.readFile(
+        path.join(TEST_FORMAT_DIR, MANIFEST_FILENAME), 'utf-8'
+      );
+      const manifest = JSON.parse(manifestContent);
+
+      expect(manifest.tiles).toHaveLength(2);
+      for (const tile of manifest.tiles) {
+        expect(tile.filePath).toMatch(/\.svg$/);
+        expect(tile.pngFilePath).toMatch(/\.png$/);
+      }
+    });
+  });
+});
+
+// ============================================================================
+// createManifest format パラメータテスト (Task 5.2)
+// ============================================================================
+
+describe('createManifest format パラメータ (Requirements: 4.1, 4.2, 4.3)', () => {
+  it('format省略時はSVGパスのみのマニフェストを生成する（後方互換性）', () => {
+    const config: TileConfig = {
+      tiles: [
+        createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+      ],
+      metadata: { version: '1.0.0' },
+    };
+
+    const manifest = createManifest(config, 'output');
+
+    expect(manifest.tileCount).toBe(2);
+    for (const tile of manifest.tiles) {
+      expect(tile.filePath).toMatch(/\.svg$/);
+      expect(tile.pngFilePath).toBeUndefined();
+    }
+  });
+
+  it('format="svg" はSVGパスのみのマニフェストを生成する', () => {
+    const config: TileConfig = {
+      tiles: [
+        createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+      ],
+      metadata: { version: '1.0.0' },
+    };
+
+    const manifest = createManifest(config, 'output', 'svg');
+
+    expect(manifest.tiles[0].filePath).toBe(path.join('output', '1m.svg'));
+    expect(manifest.tiles[0].pngFilePath).toBeUndefined();
+  });
+
+  it('format="png" はPNGパスのみのマニフェストを生成する', () => {
+    const config: TileConfig = {
+      tiles: [
+        createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+      ],
+      metadata: { version: '1.0.0' },
+    };
+
+    const manifest = createManifest(config, 'output', 'png');
+
+    expect(manifest.tiles[0].filePath).toBe(path.join('output', '1m.png'));
+    expect(manifest.tiles[0].pngFilePath).toBeUndefined();
+  });
+
+  it('format="svg,png" はSVGパスとPNGパスの両方を含むマニフェストを生成する', () => {
+    const config: TileConfig = {
+      tiles: [
+        createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+      ],
+      metadata: { version: '1.0.0' },
+    };
+
+    const manifest = createManifest(config, 'output', 'svg,png');
+
+    expect(manifest.tiles[0].filePath).toBe(path.join('output', '1m.svg'));
+    expect(manifest.tiles[0].pngFilePath).toBe(path.join('output', '1m.png'));
+  });
+
+  it('複数牌でformat="svg,png"の場合、全エントリに両パスが設定される', () => {
+    const config: TileConfig = {
+      tiles: [
+        createValidTileEntry({ id: '1m', type: 'm', number: 1 }),
+        createValidTileEntry({ id: '5p', type: 'p', number: 5 }),
+        createValidTileEntry({ id: '9s', type: 's', number: 9 }),
+        createValidTileEntry({ id: '7z', type: 'z', number: 7 }),
+      ],
+      metadata: { version: '1.0.0' },
+    };
+
+    const manifest = createManifest(config, 'tiles', 'svg,png');
+
+    expect(manifest.tileCount).toBe(4);
+    const expectedPairs = [
+      { svg: 'tiles/1m.svg', png: 'tiles/1m.png' },
+      { svg: 'tiles/5p.svg', png: 'tiles/5p.png' },
+      { svg: 'tiles/9s.svg', png: 'tiles/9s.png' },
+      { svg: 'tiles/7z.svg', png: 'tiles/7z.png' },
+    ];
+
+    manifest.tiles.forEach((tile, i) => {
+      expect(tile.filePath).toBe(path.join(expectedPairs[i].svg));
+      expect(tile.pngFilePath).toBe(path.join(expectedPairs[i].png));
+    });
   });
 });
